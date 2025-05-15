@@ -1,4 +1,4 @@
-name: Build and Deploy
+name: Build and Deploy to Elastic Beanstalk
 
 on:
   push:
@@ -8,54 +8,81 @@ env:
   APP_NAME: ${{ vars.APP_NAME || secrets.APP_NAME }}
   APP_VERSION: "1.0.0"
   S3_BUCKET: "elasticbeanstalk-eu-central-1-204529129805"
-  AWS_REGION: ${{ vars.AWS_DEFAULT_REGION || secrets.AWS_DEFAULT_REGION }}
-  AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
-  AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-  AWS_PLATFORM: Docker
-  ENV_NAME: ${{ vars.ENV_NAME || secrets.ENV_NAME }}
-  SSH_KEY: ${{ secrets.SSH_KEY }}
+  AWS_PLATFORM: "Docker"
 
 jobs:
   create_app_version:
     runs-on: ubuntu-latest
-    container: python:latest
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
-        
-      - name: Install AWS CLI
-        run: pip install awscli
-        
-      - name: Create and upload version
+
+      - name: Configure AWS CLI
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION || vars.AWS_REGION || 'eu-central-1' }}
+
+      - name: Install dependencies
         run: |
-          echo $APP_NAME
-          echo "Creating a new zip file"
-          python zip.py "$APP_NAME"  # Make sure to pass the argument
-          echo "Creating a new AWS Version Label"
-          AWS_VERSION_LABEL=$APP_NAME-$APP_VERSION-$GITHUB_RUN_ID
+          sudo apt-get update
+          sudo apt-get install -y zip awscli
+
+      - name: Create and upload version
+        env:
+          AWS_REGION: ${{ secrets.AWS_REGION || vars.AWS_REGION || 'eu-central-1' }}
+        run: |
+          echo "APP_NAME: $APP_NAME"
+          echo "Creating zip file"
+          zip -r "$APP_NAME.zip" . -x '*.git*' '*.github*'
+
+          AWS_VERSION_LABEL="$APP_NAME-$APP_VERSION-$GITHUB_RUN_ID"
           S3_KEY="$AWS_VERSION_LABEL.zip"
-          echo "Uploading version to bucket"
-          aws s3 cp $APP_NAME.zip s3://$S3_BUCKET/$S3_KEY --region $AWS_REGION
-          echo "Creating new app version"
+
+          echo "Uploading to S3 (Region: $AWS_REGION)"
+          aws s3 cp "$APP_NAME.zip" "s3://$S3_BUCKET/$S3_KEY" --region "$AWS_REGION"
+
+          echo "Creating EB application version"
           aws elasticbeanstalk create-application-version \
-              --application-name $APP_NAME \
-              --version-label $AWS_VERSION_LABEL \
-              --region $AWS_REGION \
-              --source-bundle S3Bucket=$S3_BUCKET,S3Key=$S3_KEY \
-              --description "$GITHUB_SHA" \
-              --auto-create-application
+            --application-name "$APP_NAME" \
+            --version-label "$AWS_VERSION_LABEL" \
+            --region "$AWS_REGION" \
+            --source-bundle "S3Bucket=$S3_BUCKET,S3Key=$S3_KEY" \
+            --description "$GITHUB_SHA" \
+            --auto-create-application
 
   deploy_app_version:
     needs: create_app_version
     runs-on: ubuntu-latest
-    container: coxauto/aws-ebcli
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
-        
-      - name: Deploy app
+
+      - name: Install EB CLI
         run: |
-          AWS_VERSION_LABEL=$APP_NAME-$APP_VERSION-$GITHUB_RUN_ID
-          echo "Deploying app"
-          eb init -i $APP_NAME -p $AWS_PLATFORM -k $SSH_KEY --region $AWS_REGION
-          eb deploy $ENV_NAME --version $AWS_VERSION_LABEL
+          sudo apt-get update
+          sudo apt-get install -y python3-pip
+          pip install awsebcli
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION || vars.AWS_REGION || 'eu-central-1' }}
+
+      - name: Deploy app
+        env:
+          ENV_NAME: ${{ vars.ENV_NAME || secrets.ENV_NAME }}
+          SSH_KEY: ${{ secrets.SSH_KEY }}
+        run: |
+          AWS_VERSION_LABEL="$APP_NAME-$APP_VERSION-$GITHUB_RUN_ID"
+          echo "Deploying version $AWS_VERSION_LABEL to $ENV_NAME"
+          
+          mkdir -p ~/.ssh
+          echo "$SSH_KEY" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+          
+          eb init "$APP_NAME" -p "$AWS_PLATFORM" --region "$AWS_REGION"
+          eb deploy "$ENV_NAME" --version "$AWS_VERSION_LABEL"
