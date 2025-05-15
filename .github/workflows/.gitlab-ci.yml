@@ -28,8 +28,9 @@ jobs:
         
       - name: Create and upload version
         run: |
+          echo $APP_NAME
           echo "Creating a new zip file"
-          zip -r "$APP_NAME.zip" . -x '*.git*' '*.github*'  # Exclude git files
+          python zip.py "$APP_NAME"  # Make sure to pass the argument
           echo "Creating a new AWS Version Label"
           AWS_VERSION_LABEL=$APP_NAME-$APP_VERSION-$GITHUB_RUN_ID
           S3_KEY="$AWS_VERSION_LABEL.zip"
